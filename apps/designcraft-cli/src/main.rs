@@ -335,7 +335,7 @@ fn fit_png(png: Vec<u8>, size: Option<u32>) -> Result<Vec<u8>, String> {
 fn build_mcp_backend(
     connect: Option<&str>,
     sample: bool,
-    roots: Option<designcraft_engine::file_access::AutomationRoots>,
+    roots: Option<std::sync::Arc<designcraft_engine::file_access::AutomationRoots>>,
 ) -> Result<Box<dyn designcraft_mcp::Backend>, String> {
     use designcraft_mcp::{Headless, Remote, control_addr};
     match connect {
@@ -768,7 +768,7 @@ fn app(args: &[String]) -> Result<(), String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--port" | "--connect" => port = it.next().cloned().ok_or("--port needs a value")?,
-            "--method" => method = Some(it.next().cloned().ok_or("--method needs a value")?)?,
+            "--method" => method = Some(it.next().cloned().ok_or("--method needs a value")?),
             _ => rest.push(a.clone()),
         }
     }

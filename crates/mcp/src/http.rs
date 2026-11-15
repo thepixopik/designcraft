@@ -59,6 +59,7 @@ enum EngineJob {
     Shutdown,
 }
 
+#[derive(Debug)]
 struct HttpReply {
     status: u16,
     reason: &'static str,
@@ -84,6 +85,10 @@ impl HttpReply {
     fn unauthorized() -> Self {
         Self::json(401, "Unauthorized", None, "{\"error\":\"unauthorized\"}".into())
     }
+}
+
+fn bad_request(msg: &str) -> HttpReply {
+    HttpReply::json(400, "Bad Request", None, format!("{{\"error\":\"{msg}\"}}"))
 }
 
 struct SessionEntry {
@@ -283,7 +288,7 @@ where
 {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return HttpReply::json(400, "Bad Request", None, "{\"error\":\"empty JSON-RPC body\"}".into());
+        return bad_request("empty JSON-RPC body");
     }
     let is_init = is_initialize_payload(trimmed);
 
@@ -330,7 +335,9 @@ fn dispatch_batch(server: &mut Server, raw: &str) -> Option<String> {
     let items: Vec<serde_json::Value> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
-            return Some(serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}).to_string());
+            return Some(
+                serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}).to_string(),
+            );
         }
     };
     if items.is_empty() {
@@ -358,11 +365,7 @@ fn is_initialize_payload(raw: &str) -> bool {
 }
 
 fn evict_oldest_non_shared(sessions: &mut HashMap<String, SessionEntry>) {
-    let oldest = sessions
-        .iter()
-        .filter(|(k, _)| k.as_str() != SHARED_SESSION_KEY)
-        .min_by_key(|(_, v)| v.last_used)
-        .map(|(k, _)| k.clone());
+    let oldest = sessions.iter().filter(|(k, _)| k.as_str() != SHARED_SESSION_KEY).min_by_key(|(_, v)| v.last_used).map(|(k, _)| k.clone());
     if let Some(k) = oldest {
         sessions.remove(&k);
     }
@@ -410,6 +413,15 @@ struct ParsedRequest {
     body: String,
 }
 
+#[derive(Default)]
+struct HeaderFields {
+    content_length: Option<usize>,
+    chunked: bool,
+    authorization: Option<String>,
+    session_id: Option<String>,
+    connection: Option<String>,
+}
+
 fn read_line_capped(reader: &mut impl BufRead, buf: &mut Vec<u8>, cap: usize) -> std::io::Result<bool> {
     buf.clear();
     let limit = (cap as u64).saturating_add(2);
@@ -421,6 +433,47 @@ fn read_line_capped(reader: &mut impl BufRead, buf: &mut Vec<u8>, cap: usize) ->
         buf.pop();
     }
     Ok(true)
+}
+
+fn read_headers(reader: &mut BufReader<TcpStream>) -> Result<HeaderFields, HttpReply> {
+    let mut fields = HeaderFields::default();
+    for _ in 0..MAX_HEADERS {
+        let mut hbuf = Vec::new();
+        let has_line = read_line_capped(reader, &mut hbuf, MAX_HEADER_LINE_BYTES).map_err(|_| bad_request("truncated headers"))?;
+        if !has_line || hbuf.is_empty() {
+            break;
+        }
+        if hbuf.len() > MAX_HEADER_LINE_BYTES {
+            return Err(HttpReply::json(431, "Request Header Fields Too Large", None, "{\"error\":\"header line too large\"}".into()));
+        }
+        let header_str = String::from_utf8(hbuf).map_err(|_| bad_request("invalid header encoding"))?;
+        apply_header_line(&header_str, &mut fields)?;
+    }
+    Ok(fields)
+}
+
+fn apply_header_line(header_str: &str, fields: &mut HeaderFields) -> Result<(), HttpReply> {
+    let Some((name, val)) = header_str.split_once(':') else {
+        return Err(bad_request("malformed header"));
+    };
+    let name = name.trim();
+    let val = val.trim();
+    if name.eq_ignore_ascii_case("content-length") {
+        let parsed = val.parse::<usize>().map_err(|_| bad_request("bad Content-Length"))?;
+        if parsed > MAX_BODY_BYTES {
+            return Err(HttpReply::json(413, "Payload Too Large", None, "{\"error\":\"payload exceeds max size\"}".into()));
+        }
+        fields.content_length = Some(parsed);
+    } else if name.eq_ignore_ascii_case("transfer-encoding") && val.to_ascii_lowercase().contains("chunked") {
+        fields.chunked = true;
+    } else if name.eq_ignore_ascii_case("authorization") {
+        fields.authorization = Some(val.to_string());
+    } else if name.eq_ignore_ascii_case("mcp-session-id") && !val.is_empty() {
+        fields.session_id = Some(val.to_string());
+    } else if name.eq_ignore_ascii_case("connection") {
+        fields.connection = Some(val.to_ascii_lowercase());
+    }
+    Ok(())
 }
 
 fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<Option<ParsedRequest>, HttpReply> {
@@ -435,107 +488,50 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<Option<ParsedR
     if line_buf.len() > MAX_HEADER_LINE_BYTES {
         return Err(HttpReply::json(414, "URI Too Long", None, "{\"error\":\"request line too long\"}".into()));
     }
-    let req_line = String::from_utf8(line_buf)
-        .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"invalid request line encoding\"}".into()))?;
+    let req_line = String::from_utf8(line_buf).map_err(|_| bad_request("invalid request line encoding"))?;
     if req_line.trim().is_empty() {
         return Ok(None);
     }
 
     let mut parts = req_line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| HttpReply::json(400, "Bad Request", None, "{\"error\":\"missing HTTP method\"}".into()))?
-        .to_uppercase();
-    let path = parts
-        .next()
-        .ok_or_else(|| HttpReply::json(400, "Bad Request", None, "{\"error\":\"missing request target\"}".into()))?
-        .to_string();
-    let version = parts
-        .next()
-        .ok_or_else(|| HttpReply::json(400, "Bad Request", None, "{\"error\":\"missing HTTP version\"}".into()))?;
+    let method = parts.next().ok_or_else(|| bad_request("missing HTTP method"))?.to_uppercase();
+    let path = parts.next().ok_or_else(|| bad_request("missing request target"))?.to_string();
+    let version = parts.next().ok_or_else(|| bad_request("missing HTTP version"))?;
 
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    let mut authorization: Option<String> = None;
-    let mut session_id: Option<String> = None;
-    let mut connection_hdr: Option<String> = None;
+    let headers = read_headers(reader)?;
 
-    for _ in 0..MAX_HEADERS {
-        let mut hbuf = Vec::new();
-        let has_line = read_line_capped(reader, &mut hbuf, MAX_HEADER_LINE_BYTES)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"truncated headers\"}".into()))?;
-        if !has_line || hbuf.is_empty() {
-            break;
-        }
-        if hbuf.len() > MAX_HEADER_LINE_BYTES {
-            return Err(HttpReply::json(431, "Request Header Fields Too Large", None, "{\"error\":\"header line too large\"}".into()));
-        }
-        let header_str = String::from_utf8(hbuf)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"invalid header encoding\"}".into()))?;
-        let Some((name, val)) = header_str.split_once(':') else {
-            return Err(HttpReply::json(400, "Bad Request", None, "{\"error\":\"malformed header\"}".into()));
-        };
-        let name = name.trim();
-        let val = val.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            let parsed = val
-                .parse::<usize>()
-                .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"bad Content-Length\"}".into()))?;
-            if parsed > MAX_BODY_BYTES {
-                return Err(HttpReply::json(413, "Payload Too Large", None, "{\"error\":\"payload exceeds max size\"}".into()));
-            }
-            content_length = Some(parsed);
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            if val.to_ascii_lowercase().contains("chunked") {
-                chunked = true;
-            }
-        } else if name.eq_ignore_ascii_case("authorization") {
-            authorization = Some(val.to_string());
-        } else if name.eq_ignore_ascii_case("mcp-session-id") && !val.is_empty() {
-            session_id = Some(val.to_string());
-        } else if name.eq_ignore_ascii_case("connection") {
-            connection_hdr = Some(val.to_ascii_lowercase());
-        }
-    }
-
-    let body_bytes = if chunked {
+    let body_bytes = if headers.chunked {
         read_chunked_body(reader)?
-    } else if let Some(len) = content_length {
+    } else if let Some(len) = headers.content_length {
         let mut buf = vec![0u8; len];
-        reader
-            .read_exact(&mut buf)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"unexpected EOF reading body\"}".into()))?;
+        reader.read_exact(&mut buf).map_err(|_| bad_request("unexpected EOF reading body"))?;
         buf
     } else {
         Vec::new()
     };
 
-    let body = String::from_utf8(body_bytes)
-        .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"request body is not UTF-8\"}".into()))?;
+    let body = String::from_utf8(body_bytes).map_err(|_| bad_request("request body is not UTF-8"))?;
 
-    let close_after = match connection_hdr.as_deref() {
+    let close_after = match headers.connection.as_deref() {
         Some(c) if c.contains("close") => true,
         Some(c) if c.contains("keep-alive") => false,
         _ => version == "HTTP/1.0",
     };
 
-    Ok(Some(ParsedRequest { method, path, authorization, session_id, close_after, body }))
+    Ok(Some(ParsedRequest { method, path, authorization: headers.authorization, session_id: headers.session_id, close_after, body }))
 }
 
 fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<Vec<u8>, HttpReply> {
     let mut out = Vec::new();
     loop {
         let mut size_line = Vec::new();
-        let ok = read_line_capped(reader, &mut size_line, 128)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"invalid chunk header\"}".into()))?;
+        let ok = read_line_capped(reader, &mut size_line, 128).map_err(|_| bad_request("invalid chunk header"))?;
         if !ok || size_line.len() > 128 {
-            return Err(HttpReply::json(400, "Bad Request", None, "{\"error\":\"invalid chunk size line\"}".into()));
+            return Err(bad_request("invalid chunk size line"));
         }
-        let size_str = String::from_utf8(size_line)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"bad chunk header encoding\"}".into()))?;
+        let size_str = String::from_utf8(size_line).map_err(|_| bad_request("bad chunk header encoding"))?;
         let hex_part = size_str.split(';').next().unwrap_or("").trim();
-        let chunk_len = usize::from_str_radix(hex_part, 16)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"malformed chunk size\"}".into()))?;
+        let chunk_len = usize::from_str_radix(hex_part, 16).map_err(|_| bad_request("malformed chunk size"))?;
         if chunk_len == 0 {
             let mut trailer = Vec::new();
             let _ = read_line_capped(reader, &mut trailer, MAX_HEADER_LINE_BYTES);
@@ -547,14 +543,10 @@ fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<Vec<u8>, HttpR
         let start = out.len();
         out.resize(start + chunk_len, 0);
         if let Some(target) = out.get_mut(start..) {
-            reader
-                .read_exact(target)
-                .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"truncated chunk body\"}".into()))?;
+            reader.read_exact(target).map_err(|_| bad_request("truncated chunk body"))?;
         }
         let mut crlf = [0u8; 2];
-        reader
-            .read_exact(&mut crlf)
-            .map_err(|_| HttpReply::json(400, "Bad Request", None, "{\"error\":\"missing chunk CRLF\"}".into()))?;
+        reader.read_exact(&mut crlf).map_err(|_| bad_request("missing chunk CRLF"))?;
     }
     Ok(out)
 }
@@ -637,10 +629,8 @@ mod http_tests {
     fn bearer_token_gate_blocks_unauthenticated_mcp_calls() {
         let srv = TestServer::start(HttpConfig { auth_token: Some("top-secret".into()), ..Default::default() });
         let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
-        let unauth = srv.raw_request(&format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        ));
+        let unauth =
+            srv.raw_request(&format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
         assert!(unauth.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
 
         let authed = srv.raw_request(&format!(
@@ -665,10 +655,8 @@ mod http_tests {
         assert!(r1.contains("\"name\":\"designcraft\""));
 
         let notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
-        let r2 = srv.raw_request(&format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{notif}",
-            notif.len()
-        ));
+        let r2 =
+            srv.raw_request(&format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{notif}", notif.len()));
         assert!(r2.starts_with("HTTP/1.1 202 Accepted\r\n"));
 
         let create = serde_json::json!({
@@ -684,10 +672,8 @@ mod http_tests {
             }
         })
         .to_string();
-        let r3 = srv.raw_request(&format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create}",
-            create.len()
-        ));
+        let r3 = srv
+            .raw_request(&format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create}", create.len()));
         assert!(r3.starts_with("HTTP/1.1 200 OK\r\n"), "create failed: {r3}");
 
         let inspect = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"inspect_document\",\"arguments\":{}}}";
