@@ -1,6 +1,6 @@
 //! DesignCraft's MCP server.
 //!
-//! [Model Context Protocol](https://modelcontextprotocol.io) over stdio: newline-delimited
+//! [Model Context Protocol](https://modelcontextprotocol.io) over stdio or Streamable HTTP:
 //! JSON-RPC 2.0, hand-written (no async runtime). The server exposes DesignCraft as a set of MCP
 //! tools and resources and forwards everything to a [`Backend`]:
 //!
@@ -11,12 +11,15 @@
 //!   engine-level control-channel methods itself (rendering pages with `designcraft-render`), so
 //!   agents can build layouts and look at them without a window.
 //!
-//! Entry points: [`Server::serve`] (stdio loop) and [`Server::handle_line`] (one message).
+//! Entry points: [`Server::serve`] (stdio loop), [`http::serve`] (Streamable HTTP), and
+//! [`Server::handle_line`] (one message).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 mod backend;
 mod headless;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http;
 mod server;
 mod tools;
 

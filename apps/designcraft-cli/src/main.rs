@@ -10,8 +10,8 @@
 //!                                      # run a command script (crates/engine/src/script.rs): `$N.path` references
 //! designcraft-cli app [--port PORT] COMMAND [JSON]   # run a command in the running app (designcraft --control PORT)
 //! designcraft-cli app [--port PORT] --method METHOD [JSON]   # any control-channel method (ui.screenshot, ui.render, …)
-//! designcraft-cli mcp [--connect PORT] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...
-//!                                      # MCP server over stdio (docs/mcp.md); the roots confine the files it reads and writes
+//! designcraft-cli mcp [--connect PORT] [--http ADDR] [--http-token TOKEN] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...
+//!                                      # MCP server over stdio or Streamable HTTP (docs/mcp.md); the roots confine the files it reads and writes
 //! designcraft-cli perf [--pages N] [--frames N] [--chars N] [--images N] [--runs N] [--strict]  # budgets on a synthetic stress document
 //! designcraft-cli bench FILE [--runs N]  # the same measurements on one document
 //! designcraft-cli validate-pdf FILE.pdf [--standard x4|x1a]   # the built-in PDF/X-4 or PDF/X-1a checks (default: the
@@ -42,7 +42,7 @@ use designcraft_engine::Session;
 use serde_json::{Value, json};
 
 /// The usage block. Shared by `--help` (stdout, success) and an unknown command (stderr, failure).
-const USAGE: &str = "usage: designcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--page N] [--scale S] [--pdf-options JSON] [--export OUT] [--all-pages DIR]\n         (--page, --scale and --pdf-options apply to the exports that follow them)\n       designcraft-cli commands [FILTER]\n       designcraft-cli describe COMMAND\n       designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]\n       designcraft-cli app [--port PORT] COMMAND [JSON] | --method METHOD [JSON]\n       designcraft-cli mcp [--connect PORT] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...\n         the roots confine every file the agent's commands read (open, placed images, data sources, libraries) and\n         write (save, export, package) to those folders, links followed. Each may be given more than once; a kind\n         left out grants none of its access.\n         They run the in-process server, so they conflict with --connect (a running app is not confined by them).\n       designcraft-cli perf [--pages N] [--runs N] [--strict]\n       designcraft-cli bench FILE [--runs N]\n       designcraft-cli validate-pdf FILE.pdf [--standard x4|x1a]  # built-in PDF/X checks (including visible unembedded fonts; the standard defaults to the file's own)\n       designcraft-cli thumbnail FILE.designcraft OUT.png [SIZE]  # the saved first-page preview, at most SIZE px\n       designcraft-cli links\n       designcraft-cli --version";
+const USAGE: &str = "usage: designcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--page N] [--scale S] [--pdf-options JSON] [--export OUT] [--all-pages DIR]\n         (--page, --scale and --pdf-options apply to the exports that follow them)\n       designcraft-cli commands [FILTER]\n       designcraft-cli describe COMMAND\n       designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]\n       designcraft-cli app [--port PORT] COMMAND [JSON] | --method METHOD [JSON]\n       designcraft-cli mcp [--connect PORT] [--http ADDR] [--http-token TOKEN] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...\n         the roots confine every file the agent's commands read (open, placed images, data sources, libraries) and\n         write (save, export, package) to those folders, links followed. Each may be given more than once; a kind\n         left out grants none of its access.\n         They run the in-process server, so they conflict with --connect (a running app is not confined by them).\n       designcraft-cli perf [--pages N] [--runs N] [--strict]\n       designcraft-cli bench FILE [--runs N]\n       designcraft-cli validate-pdf FILE.pdf [--standard x4|x1a]  # built-in PDF/X checks (including visible unembedded fonts; the standard defaults to the file's own)\n       designcraft-cli thumbnail FILE.designcraft OUT.png [SIZE]  # the saved first-page preview, at most SIZE px\n       designcraft-cli links\n       designcraft-cli --version";
 
 /// `script --help`: the script syntax, otherwise only in `describe script.run` and docs/agents.md.
 const SCRIPT_HELP: &str = r#"usage: designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]
@@ -332,12 +332,43 @@ fn fit_png(png: Vec<u8>, size: Option<u32>) -> Result<Vec<u8>, String> {
     craft_image_codecs::encode(&encoded, craft_image_codecs::Format::Png, &Default::default()).map_err(|e| e.to_string())
 }
 
+fn build_mcp_backend(
+    connect: Option<&str>,
+    sample: bool,
+    roots: Option<designcraft_engine::file_access::AutomationRoots>,
+) -> Result<Box<dyn designcraft_mcp::Backend>, String> {
+    use designcraft_mcp::{Headless, Remote, control_addr};
+    match connect {
+        Some(c) => {
+            let addr = control_addr(c);
+            let remote = Remote::connect(&addr)
+                .map_err(|e| format!("cannot connect to the DesignCraft app at {addr}: {e} (start it with `designcraft --control PORT`)"))?;
+            Ok(Box::new(remote))
+        }
+        None => {
+            let mut h = Headless::with_document();
+            // `--sample` is the operator's own choice, made before the roots come into force.
+            if sample {
+                h.session.execute("file.newSample", &json!({})).map_err(|e| e.to_string())?;
+            }
+            if let Some(roots) = roots {
+                h = h.with_automation_roots(Some(roots));
+            }
+            Ok(Box::new(h))
+        }
+    }
+}
+
 /// `mcp` (headless, in-process engine) or `mcp --connect PORT|HOST:PORT` (drive a running app
-/// started with `designcraft --control PORT`). JSON-RPC on stdin/stdout; logs on stderr.
+/// started with `designcraft --control PORT`). JSON-RPC on stdin/stdout or Streamable HTTP with
+/// `--http ADDR`; logs on stderr.
 fn mcp(args: &[String]) -> Result<(), String> {
     use designcraft_engine::file_access::{self, AutomationRoots};
-    use designcraft_mcp::{Backend, Headless, Remote, Server, control_addr};
+    use designcraft_mcp::{Server, control_addr};
     let mut connect: Option<String> = None;
+    let mut http: Option<String> = None;
+    let mut http_token: Option<String> = std::env::var("DESIGNCRAFT_MCP_TOKEN").ok().filter(|t| !t.is_empty());
+    let mut token_flag = false;
     let mut sample = false;
     let mut roots_args = automation_args::AutomationArgs::default();
     let mut it = args.iter().cloned();
@@ -347,13 +378,21 @@ fn mcp(args: &[String]) -> Result<(), String> {
         }
         match a.as_str() {
             "--connect" => connect = Some(value(&a, it.next().as_ref())?),
+            "--http" => http = Some(value(&a, it.next().as_ref())?),
+            "--http-token" => {
+                http_token = Some(value(&a, it.next().as_ref())?);
+                token_flag = true;
+            }
             "--sample" => sample = true,
             other => {
                 return Err(format!(
-                    "unknown mcp option `{other}` (usage: designcraft-cli mcp [--connect PORT] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...)"
+                    "unknown mcp option `{other}` (usage: designcraft-cli mcp [--connect PORT] [--http ADDR] [--http-token TOKEN] [--sample] [--automation-read-root DIR]... [--automation-write-root DIR]...)"
                 ));
             }
         }
+    }
+    if token_flag && http.is_none() {
+        return Err("--http-token requires --http ADDR".into());
     }
     let read: Vec<&std::path::Path> = roots_args.read_roots.iter().map(std::path::PathBuf::as_path).collect();
     let write: Vec<&std::path::Path> = roots_args.write_roots.iter().map(std::path::PathBuf::as_path).collect();
@@ -363,29 +402,19 @@ fn mcp(args: &[String]) -> Result<(), String> {
 so drop --connect (or use --connect without the roots)"
             .into());
     }
-    let backend: Box<dyn Backend> = match connect {
-        Some(c) => {
-            let addr = control_addr(&c);
-            Box::new(
-                Remote::connect(&addr)
-                    .map_err(|e| format!("cannot connect to the DesignCraft app at {addr}: {e} (start it with `designcraft --control PORT`)"))?,
-            )
-        }
-        None => {
-            let mut h = Headless::with_document();
-            // `--sample` is the operator's own choice, made before the roots come into force.
-            if sample {
-                h.session.execute("file.newSample", &json!({})).map_err(|e| e.to_string())?;
-            }
-            if let Some(roots) = roots {
-                // Every thread of this process, not only the server's: nothing reaches past the roots.
-                file_access::confine_process(roots.clone());
-                eprintln!("designcraft-cli: files confined: {}", roots.describe());
-                h = h.with_automation_roots(Some(roots));
-            }
-            Box::new(h)
-        }
-    };
+    if let Some(ref r) = roots {
+        // Every thread of this process, not only the server's: nothing reaches past the roots.
+        file_access::confine_process(r.clone());
+        eprintln!("designcraft-cli: files confined: {}", r.describe());
+    }
+    if let Some(listen) = http {
+        let addr = control_addr(&listen);
+        let cfg = designcraft_mcp::http::HttpConfig { auth_token: http_token, ..Default::default() };
+        eprintln!("designcraft-cli: MCP HTTP server on http://{addr}/mcp");
+        return designcraft_mcp::http::serve(&addr, cfg, move || build_mcp_backend(connect.as_deref(), sample, roots.clone()))
+            .map_err(|e| format!("cannot bind HTTP MCP server on {addr}: {e}"));
+    }
+    let backend = build_mcp_backend(connect.as_deref(), sample, roots)?;
     eprintln!("designcraft-cli: MCP server on stdio ({})", backend.describe());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -739,7 +768,7 @@ fn app(args: &[String]) -> Result<(), String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--port" | "--connect" => port = it.next().cloned().ok_or("--port needs a value")?,
-            "--method" => method = Some(it.next().cloned().ok_or("--method needs a value")?),
+            "--method" => method = Some(it.next().cloned().ok_or("--method needs a value")?)?,
             _ => rest.push(a.clone()),
         }
     }
