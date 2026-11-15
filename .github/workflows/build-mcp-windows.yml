@@ -1,0 +1,42 @@
+name: Build DesignCraft MCP (Windows x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "crates/mcp/**"
+      - "apps/designcraft-cli/**"
+      - ".github/workflows/build-mcp-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build designcraft-cli (Release)
+        run: cargo build --locked --release -p designcraft-cli
+
+      - name: Smoke-test MCP CLI help
+        run: .\target\release\designcraft-cli.exe mcp --help
+
+      - name: Upload Windows MCP binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: designcraft-mcp-windows-x64
+          path: target/release/designcraft-cli.exe
+          if-no-files-found: error
+          retention-days: 30
