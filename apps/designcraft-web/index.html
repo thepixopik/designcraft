@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DesignCraft</title>
-  <link data-trunk rel="rust" data-bin="designcraft-web" data-wasm-opt="z" data-weak-refs />
+  <title>The AllCraft Design</title>
+  <link data-trunk rel="rust" data-bin="designcraft-web" data-wasm-opt="0" data-weak-refs />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
     #designcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
@@ -14,6 +14,12 @@
 </head>
 <body>
   <canvas id="designcraft_canvas"></canvas>
-  <div id="designcraft_loading">Loading DesignCraft&hellip;</div>
+  <div id="designcraft_loading">
+    <div style="margin-bottom:12px;font-size:15px;font-weight:600;color:#ececef">Loading The AllCraft Design&hellip;</div>
+    <div style="width:240px;height:5px;background:#3a3a3a;border-radius:999px;overflow:hidden">
+      <div id="dc_load_bar" style="width:2%;height:100%;background:#f59e0b;border-radius:999px;transition:width 0.12s ease-out"></div>
+    </div>
+    <div id="dc_load_pct" style="margin-top:8px;font-size:12px;color:#9a9a9a;font-variant-numeric:tabular-nums">Starting&hellip;</div>
+  </div>
 </body>
 </html>

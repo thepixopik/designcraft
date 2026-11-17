@@ -12,10 +12,7 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
         })),
         |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(crate::rtl::widget(
-                    ui,
-                    egui::RichText::new(crate::i18n::tr(&app.ui.language, "Welcome to DesignCraft")).font(semibold(28.0)).color(t.text_strong),
-                ));
+                ui.label(crate::rtl::widget(ui, egui::RichText::new("Welcome to The AllCraft Design").font(semibold(28.0)).color(t.text_strong)));
                 ui.label(crate::rtl::widget(
                     ui,
                     egui::RichText::new(crate::i18n::tr(&app.ui.language, "Page layout for print and screen — fast, open and scriptable."))
@@ -108,12 +105,8 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
     let _ = Content::Unassigned;
 }
 
-/// Recent files shown on the start screen (File › Open Recent has them all).
 const START_SCREEN_RECENT: usize = 8;
 
-/// Start screen: the most recent files as cards with the first page's picture (saved in the file)
-/// and the name; the full path is the tooltip. A file that is gone is dimmed and says so when
-/// clicked. Nothing when the list is empty.
 fn recent_files(app: &mut DesignApp, ui: &mut egui::Ui) {
     if app.session.prefs.recent_files.is_empty() {
         return;
@@ -144,14 +137,12 @@ fn recent_files(app: &mut DesignApp, ui: &mut egui::Ui) {
                     ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                     ui.painter().rect_stroke(pr, 0.0, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
                 }
-                // No picture (saved before files had one) or the file is gone: a blank page.
                 None => {
                     let pr = egui::Rect::from_center_size(area.center(), vec2(62.0, 80.0));
                     ui.painter().rect_filled(pr, 0.0, if there { Color32::from_gray(245) } else { Color32::from_gray(110) });
                 }
             }
             let color = if there { t.text_strong } else { t.text_dim };
-            // The name without `.designcraft`, on up to two lines (broken after a space or dash).
             let label = crate::menus::recent_label(&path);
             let name = label.strip_suffix(".designcraft").unwrap_or(&label).to_string();
             let mut job = egui::text::LayoutJob::simple(name, semibold(12.0), color, cr.width() - 12.0);
@@ -169,11 +160,8 @@ fn recent_files(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
 }
 
-/// How often a recent file is looked up on disk again, in ms: the start screen and the Open Recent
-/// menu draw every frame and must not touch the file system each time.
 pub(super) const RECENT_STAT_MS: f64 = 3000.0;
 
-/// A recent file as last seen on disk.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecentStat {
     pub exists: bool,
@@ -181,8 +169,6 @@ pub(crate) struct RecentStat {
     checked: f64,
 }
 
-/// Whether recent file `path` is there and when it last changed, looked up again at most every
-/// [`RECENT_STAT_MS`].
 pub(crate) fn recent_file_stat(ctx: &egui::Context, path: &str) -> RecentStat {
     recent_file_stat_at(ctx, path, crate::now_ms())
 }
@@ -200,7 +186,6 @@ pub(super) fn recent_file_stat_at(ctx: &egui::Context, path: &str, now: f64) -> 
     st
 }
 
-/// The texture of a recent file's saved first-page picture, decoded once per file version.
 fn recent_preview_texture(ctx: &egui::Context, path: &str, modified: Option<std::time::SystemTime>) -> Option<egui::TextureHandle> {
     type Cached = (Option<std::time::SystemTime>, Option<egui::TextureHandle>);
     let key = egui::Id::unique(("recent_preview", path));
@@ -219,37 +204,31 @@ fn recent_preview_texture(ctx: &egui::Context, path: &str, modified: Option<std:
     tex
 }
 
-/// Start screen: the ArtCraft community (Discord first) and project links.
 fn community_card(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Frame::NONE.fill(t.panel).corner_radius(10.0).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
-        // Wide enough for the longer translations of the line under the title, with the button
-        // at the right edge; the text wraps before the button's space rather than run under it.
         const BUTTON: egui::Vec2 = vec2(190.0, 38.0);
         ui.set_max_width(760.0);
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
             crate::about::paint_mark(ui, r, crate::about::BRAND);
             ui.add_space(8.0);
-            let label = crate::i18n::tr(&app.ui.language, "Join our Discord");
+            let label = "AllCraft Studio";
             let button = crate::about::discord_button_size(ui.ctx(), label, BUTTON);
             let text_width = (ui.available_width() - button.x - 16.0).max(120.0);
             ui.vertical(|ui| {
                 ui.set_max_width(text_width);
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                ui.label(crate::rtl::widget(ui, egui::RichText::new("The AllCraft Studio").font(semibold(14.0)).color(t.text_strong)));
                 ui.label(crate::rtl::widget(
                     ui,
-                    egui::RichText::new(crate::i18n::tr(&app.ui.language, "Join the ArtCraft community")).font(semibold(14.0)).color(t.text_strong),
-                ));
-                ui.label(crate::rtl::widget(
-                    ui,
-                    egui::RichText::new(crate::i18n::tr(&app.ui.language, "Get help, share your layouts and shape what we build next."))
+                    egui::RichText::new("Switch between Vector, Photo, Film, PDF & Design tools right in your browser.")
                         .size(12.0)
                         .color(t.text_dim),
                 ));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    for (text, id) in [("DesignCraft page", "help.appPage"), ("GitHub", "help.github"), ("getartcraft.com", "help.website")] {
+                    for (text, id) in [("Design Web", "help.appPage"), ("GitHub", "help.github"), ("the-allcraft.pages.dev", "help.website")] {
                         let url = designcraft_engine::links::get(&id[5..]).unwrap_or_default();
                         let l = ui
                             .add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.accent).underline()).sense(Sense::click()))
@@ -264,7 +243,7 @@ fn community_card(app: &mut DesignApp, ui: &mut egui::Ui) {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::about::discord_button(ui, label, BUTTON) {
-                    let _ = app.run("help.discord", json!({}));
+                    let _ = app.run("help.website", json!({}));
                 }
             });
         });

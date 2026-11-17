@@ -6,14 +6,10 @@ pub(super) fn search_id() -> egui::Id {
     egui::Id::unique("app_bar_search")
 }
 
-/// Whether the application bar's search field had the keyboard last frame. Escape takes egui's
-/// focus away before any widget runs, so that press must not reach the global shortcuts.
 pub fn search_had_focus(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.had_focus_last_frame(search_id()))
 }
 
-/// The search field's state between frames: the query, the highlighted match, whether the matches
-/// are shown, and the widget that had the keyboard before the field took it.
 #[derive(Clone, Default)]
 struct SearchState {
     query: String,
@@ -22,10 +18,6 @@ struct SearchState {
     previous_focus: Option<egui::Id>,
 }
 
-/// The application bar's search field: finds menu commands by their labels in the interface
-/// language. ↑/↓ move through the matches; Return or a click runs one as its menu item would.
-/// Running one or pressing Escape clears the field and gives the keyboard back to the widget that
-/// had it. While the field has the keyboard, no key reaches the shortcuts or the document.
 fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let id = search_id();
@@ -67,7 +59,6 @@ fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
                 .hint_text(hint)
                 .desired_width(field.width())
                 .align(egui::Align2::LEFT_CENTER)
-                // Return runs the highlighted match instead of leaving the field.
                 .return_key(None),
         )
         .on_hover_text(crate::i18n::tr(&lang, "Search commands"));
@@ -113,7 +104,6 @@ fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
                             ui.painter().rect_filled(egui::Rect::from_min_size(ui.cursor().min, size), 2.0, t.hover);
                         }
                         let enabled = crate::menus::menu_enabled(app, &it.id);
-                        // The button aligns its label by the layout it's in: left, like the menus.
                         let row = ui.allocate_ui_with_layout(
                             size,
                             egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Min),
@@ -136,7 +126,6 @@ fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
             None => m.surrender_focus(id),
         });
     } else if !resp.has_focus() && !over_matches {
-        // A click elsewhere or Tab took the keyboard: the matches close, the query stays.
         st.open = false;
     }
     ui.data_mut(|d| d.insert_temp(state_id, st));
@@ -145,20 +134,15 @@ fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Width of the app bar's right-hand slot: what is left of the row, minus a pixel of slack so
-/// that rounding at fractional scales (115%) never makes the row a hair wider than the scroll
-/// area and shows a needless scroll bar. Never narrower than the controls themselves.
 fn tools_slot_width(available: f32, tools_w: f32) -> f32 {
     (available - 1.0).max(tools_w)
 }
 
-/// Lay out the application bar, native/custom title handling, menu and tool scrolling, drag region, caption controls and search.
 pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let mac = app.integrated_titlebar;
     let left = if mac { MAC_CONTENT_LEFT as i8 } else { 8 };
     let bar = if mac { MAC_APP_BAR } else { APP_BAR };
-    // The tallest control keeps a margin above and below it in the shorter macOS bar.
     let home = if mac { 22.0 } else { 24.0 };
     let resp = egui::Panel::top("app_bar")
         .exact_size(bar + APP_BAR_BAND)
@@ -171,8 +155,6 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             let full = ui.max_rect();
             if mac {
-                // The whole title-bar band, margins included; the controls drawn below take
-                // their own clicks.
                 let band = egui::Rect::from_min_max(
                     egui::pos2(full.min.x - f32::from(left), full.min.y),
                     egui::pos2(full.max.x + 10.0, full.min.y + MAC_APP_BAR),
@@ -181,21 +163,13 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
             let mut menus_end = full.min.x;
             let mut tools_start = full.max.x;
-            // Windows caption buttons stay at the right edge; the rest of the bar scrolls.
             let caption_w = if app.custom_titlebar { CAPTION_W } else { 0.0 };
-            // Undecorated window: the bar moves it. The drag area is the whole bar but the caption
-            // buttons, lower band included, registered before the menus and tools so they stay on
-            // top of it: any gap drags, and the lower band is always there, however narrow the
-            // window (the menus and tools scroll).
             if app.custom_titlebar {
                 let drag = egui::Rect::from_min_max(
                     egui::pos2(full.min.x - left as f32, full.min.y),
                     egui::pos2(full.max.x - caption_w, full.min.y + bar + APP_BAR_BAND),
                 );
                 let response = ui.interact(drag, egui::Id::unique("window_title_drag"), Sense::click_and_drag());
-                // Only from an empty part of the bar: the lower band, or the gap between the menus
-                // and the tools (as they were last frame). A menu title pressed and dragged doesn't
-                // move the window, as with native title bars.
                 let (gap0, gap1) = ui
                     .data(|d| (d.get_temp::<f32>(egui::Id::unique("app_bar_menus_end")), d.get_temp::<f32>(egui::Id::unique("app_bar_tools_start"))));
                 let empty = |p: egui::Pos2| p.y >= full.min.y + bar || matches!((gap0, gap1), (Some(a), Some(b)) if p.x >= a && p.x <= b);
@@ -216,12 +190,9 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
             let scrolled = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x - caption_w, full.max.y));
             ui.scope_builder(egui::UiBuilder::new().max_rect(scrolled), |ui| {
-                // The right-hand controls' width, measured last frame: in a window too narrow for them
-                // and the menus they follow the menus, and the bar scrolls sideways.
                 let tools_w_id = ui.scope_id().with("tools_width");
                 let tools_w: f32 = ui.data(|d| d.get_temp(tools_w_id)).unwrap_or(0.0);
                 crate::widgets::overflow_scrolling(ui);
-                // (Drag-scrolling is touch-only by default, so a mouse drag on the bar moves the window.)
                 egui::ScrollArea::horizontal().id_salt("app_bar_scroll").auto_shrink([false, false]).show(ui, |ui| {
                     ui.horizontal_centered(|ui| {
                         if icons::button(ui, "home", home, app.session.active().is_none(), crate::i18n::tr(&app.ui.language, "Home")).clicked() {
@@ -236,7 +207,6 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                             crate::menus::menu_bar(app, ui);
                         }
                         menus_end = ui.min_rect().max.x;
-                        // Where the menus end on screen (moves as a narrow bar scrolls).
                         ui.data_mut(|d| d.insert_temp(egui::Id::unique("app_bar_menus_end"), menus_end));
                         let size = vec2(tools_slot_width(ui.available_width(), tools_w), ui.available_height());
                         let tools = ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -299,9 +269,9 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                                 app.status(crate::i18n::tr(&app.ui.language, "Export a PDF, IDML or package to share — no cloud account needed."));
                             }
                             ui.add_space(8.0);
-                            // Always one click away: the ArtCraft community Discord.
-                            if crate::about::discord_button(ui, "Discord", vec2(78.0, 22.0)) {
-                                let _ = app.run("help.discord", json!({}));
+                            // One click back to The AllCraft Studio hub.
+                            if crate::about::discord_button(ui, "Studio", vec2(74.0, 22.0)) {
+                                let _ = app.run("help.website", json!({}));
                             }
                             tools_start = ui.min_rect().min.x;
                             ui.data_mut(|d| d.insert_temp(egui::Id::unique("app_bar_tools_start"), tools_start));
@@ -314,12 +284,10 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                     });
                 });
             });
-            // Centred title.
             let title = match app.session.active() {
-                Some(d) => format!("DesignCraft — {}", crate::rtl::isolate(&d.title())),
-                None => "DesignCraft".to_string(),
+                Some(d) => format!("The AllCraft Design — {}", crate::rtl::isolate(&d.title())),
+                None => "The AllCraft Design".to_string(),
             };
-            // Centred between the menus and the right-hand controls; left out when it won't fit.
             let galley = crate::rtl::plain(ui.ctx(), &title, egui::FontId::proportional(11.5), t.text);
             let w = galley.size().x;
             let cx = full.center().x;
@@ -333,11 +301,8 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
 }
 
 const CAPTION_BUTTON_W: f32 = 46.0;
-
-/// Minimize, maximize and close, and the space after them.
 const CAPTION_W: f32 = 3.0 * CAPTION_BUTTON_W + 8.0;
 
-/// Windows caption buttons. The macOS traffic lights remain native.
 fn caption_buttons(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -385,7 +350,6 @@ fn caption_buttons(app: &mut DesignApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// Undecorated Windows windows need resize grips as well as caption controls.
 pub(crate) fn resize_borders(app: &mut DesignApp, ui: &mut egui::Ui) {
     if ui.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)) {
         return;
